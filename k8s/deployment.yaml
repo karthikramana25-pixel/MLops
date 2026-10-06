@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-api
+  namespace: mlops
+  labels:
+    app.kubernetes.io/name: ml-api
+    app.kubernetes.io/part-of: iris-mlops
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ml-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ml-api
+        app.kubernetes.io/part-of: iris-mlops
+    spec:
+      serviceAccountName: ml-api
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: ml-api
+      containers:
+        - name: api
+          # Replace with the real ECR image URI in Git before Argo CD syncs this manifest.
+          image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/mlops-dev-ml-api:replace-before-deploy
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn"]
+          args:
+            - app.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --workers
+            - $(UVICORN_WORKERS)
+            - --log-level
+            - $(LOG_LEVEL)
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: ml-api-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - >-
+                  import json, urllib.request; response = json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)); raise SystemExit(0 if response.get('model_loaded') else 1)
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

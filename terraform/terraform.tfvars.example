@@ -1,0 +1,24 @@
+aws_region  = "us-east-1"
+project_name = "mlops"
+environment  = "dev"
+
+vpc_cidr = "10.20.0.0/16"
+
+# Leave empty to select the first two available AZs in aws_region, or specify two names.
+availability_zones = []
+
+public_subnet_cidrs = [
+  "10.20.0.0/20",
+  "10.20.16.0/20",
+]
+
+private_subnet_cidrs = [
+  "10.20.128.0/20",
+  "10.20.144.0/20",
+]
+
+ecr_image_retention_count = 30
+
+additional_tags = {
+  Owner = "ml-platform"
+}

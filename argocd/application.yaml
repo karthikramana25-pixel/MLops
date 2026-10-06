@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mlops-api
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: iris-mlops
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/REPLACE_WITH_ORG/REPLACE_WITH_REPOSITORY.git
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlops
+  syncPolicy:
+    automated:
+      enabled: true
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true

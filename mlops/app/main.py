@@ -1,12 +1,16 @@
 """HTTP API for Iris flower classification."""
 
 from fastapi import FastAPI, HTTPException
+from prometheus_client import make_asgi_app
 
 from app.model import MODEL_PATH, load_model, predict
+from app.metrics import PrometheusMetricsMiddleware
 from app.schemas import IrisFeatures, Prediction
 
 # TODO(security): Add production authentication and authorization before public exposure.
 app = FastAPI(title="Iris Classifier API", version="1.0.0")
+app.add_middleware(PrometheusMetricsMiddleware)
+app.mount("/metrics", make_asgi_app())
 
 
 @app.get("/health")

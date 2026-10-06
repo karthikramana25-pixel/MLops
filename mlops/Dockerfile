@@ -8,14 +8,14 @@ WORKDIR /app
 
 RUN groupadd --system app && useradd --system --gid app --create-home app
 
-COPY requirements.txt ./requirements.txt
-RUN python -m pip install --disable-pip-version-check --no-compile -r requirements.txt
+COPY requirements-api.txt ./requirements-api.txt
+RUN python -m pip install --disable-pip-version-check --no-compile -r requirements-api.txt
 
 COPY app ./app
 COPY ml ./ml
 COPY models ./models
 
-RUN python -m ml.train && chown -R app:app /app
+RUN python -m ml.train --skip-mlflow && chown -R app:app /app
 USER app
 
 EXPOSE 8000
