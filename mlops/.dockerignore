@@ -11,3 +11,8 @@ tests
 data
 models/*.joblib
 models/*.pkl
+mlruns/
+mlflow.db
+mlartifacts/
+*.pem
+*.key

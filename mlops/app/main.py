@@ -1,5 +1,7 @@
 """HTTP API for Iris flower classification."""
 
+import logging
+
 from fastapi import FastAPI, HTTPException
 from prometheus_client import make_asgi_app
 
@@ -8,6 +10,7 @@ from app.metrics import PrometheusMetricsMiddleware
 from app.schemas import IrisFeatures, Prediction
 
 # TODO(security): Add production authentication and authorization before public exposure.
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Iris Classifier API", version="1.0.0")
 app.add_middleware(PrometheusMetricsMiddleware)
 app.mount("/metrics", make_asgi_app())
@@ -20,6 +23,7 @@ def health() -> dict[str, str | bool]:
         load_model(str(MODEL_PATH))
         model_loaded = True
     except FileNotFoundError:
+        logger.error("Trained model is missing at %s", MODEL_PATH)
         model_loaded = False
     return {"status": "ok" if model_loaded else "model_missing", "model_loaded": model_loaded}
 
@@ -31,6 +35,7 @@ def predict_iris(features: IrisFeatures) -> Prediction:
     try:
         result = predict(values, str(MODEL_PATH))
     except FileNotFoundError as exc:
+        logger.error("Prediction unavailable because the trained model is missing at %s", MODEL_PATH)
         raise HTTPException(
             status_code=503,
             detail="Trained model is unavailable; run `python -m ml.train` first.",

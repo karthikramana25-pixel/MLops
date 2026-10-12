@@ -12,6 +12,160 @@ data/      Reserved for later data workflow exercises
 tests/     API and model unit tests
 ```
 
+## Local Docker Compose platform
+
+The repository-root `docker-compose.yml` runs the existing API alongside PostgreSQL-backed MLflow, Prometheus, and Grafana. This is a single-machine learning environment; it does not create AWS resources or use Kubernetes. The Python virtual environment instructions below remain available for running and testing the application without Docker.
+
+```mermaid
+flowchart LR
+  Client[Local browser or curl] -->|127.0.0.1:8000| API[api: FastAPI]
+  API -->|/metrics| Prometheus[prometheus]
+  Prometheus --> Grafana[grafana]
+  Trainer[trainer: one-shot job] -->|MLFLOW_TRACKING_URI=http://mlflow:5000| MLflow[mlflow tracking server]
+  MLflow -->|metadata| DB[(mlflow-db: PostgreSQL)]
+  MLflow -->|model and run files| Artifacts[(mlflow_artifacts volume)]
+  Trainer -->|updated joblib model| Model[(model_data volume)]
+  Model --> API
+```
+
+### What each container does
+
+| Compose service | Purpose | Local access and persistence |
+|---|---|---|
+| `api` | Builds the existing FastAPI application and serves `/health`, `/predict`, and `/metrics`. The image includes a reproducible model created during the image build; container startup does not train it. | `http://127.0.0.1:8000`; shares the `model_data` volume with the trainer. |
+| `mlflow-db` | Stores MLflow experiments, runs, parameters, metrics, and registry metadata in PostgreSQL. | No host port is published; `postgres_data` is persistent. |
+| `mlflow` | Provides the MLflow UI/API, connects to PostgreSQL, and proxies run-artifact uploads/downloads into its artifact directory. | `http://127.0.0.1:5000`; `mlflow_artifacts` is persistent. |
+| `trainer` | One-shot profile service that runs the existing `python -m ml.train` code and writes its joblib model to the shared model volume. | Not started by normal `docker compose up`; logs runs to `http://mlflow:5000`. |
+| `prometheus` | Scrapes the API at `api:8000/metrics` every 15 seconds. | `http://127.0.0.1:9090`; `prometheus_data` is persistent. |
+| `grafana` | Provisions Prometheus as its data source and loads the API dashboard automatically. | `http://127.0.0.1:3000`; `grafana_data` and dashboard files persist. |
+
+The Compose images are version-constrained: API and trainer use the Python 3.13 image family with the repository's exact `requirements-lock.txt` constraints; MLflow and its PostgreSQL driver use MLflow 3.16.1 and psycopg2-binary 2.9.11; PostgreSQL uses `16.15-alpine3.24`; Prometheus uses the existing pinned `v3.5.5` image; and Grafana uses `13.2.2-slim`. No service uses a floating `latest` tag. For immutable production builds, pin each base image by digest and maintain security updates deliberately.
+
+PostgreSQL and MLflow are published only on the host loopback address; PostgreSQL has no published port. The other UIs and API are also bound to `127.0.0.1` by default. For an EC2 development host, connect from your workstation with SSH port forwarding rather than opening these ports to the Internet. If you choose direct access instead, restrict the EC2 security group to your trusted public IP. This is a learning setup, not a production security boundary.
+
+### Prerequisites and environment setup
+
+- Linux EC2 development machine (or another Docker host) with Docker Engine and the Docker Compose v2 plugin.
+- Git checkout with enough disk space for the images, PostgreSQL data, MLflow artifacts, Prometheus time series, and Grafana data.
+- Python is needed for the repository's local virtual environment and tests; the Compose services run in containers.
+
+From the repository root, create an untracked local environment file and replace the example passwords with local, URL-safe values:
+
+```bash
+cp .env.example .env
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Use one generated value for `POSTGRES_PASSWORD` and a different value for `GRAFANA_ADMIN_PASSWORD` in `.env`. Keep `MLFLOW_TRACKING_URI=http://mlflow:5000` for container-to-container training traffic. These values are for this local exercise only. Never use production credentials here or commit `.env`. The root `.gitignore` excludes `.env`, key material, generated MLflow files, Python caches, and Terraform state. The example file contains safe placeholders, not working production secrets.
+
+### Build and start
+
+Run all Compose commands from the repository root, not from `mlops/`:
+
+```bash
+docker compose config
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+`docker compose config` validates and renders the configuration. Be careful when sharing its output: it may include values from your local `.env`. `docker compose build` builds the API, MLflow, PostgreSQL, Prometheus, and Grafana images. The optional training image has its own build command below. `docker compose up -d` starts the five long-running services. PostgreSQL is marked healthy before MLflow starts; Prometheus waits for the API health check; Grafana waits for Prometheus. Health checks use the service's readiness endpoint or built-in command.
+
+Follow logs and check status with:
+
+```bash
+docker compose ps
+docker compose logs -f api
+docker compose logs -f mlflow
+docker compose logs -f mlflow-db
+docker compose logs -f prometheus
+docker compose logs -f grafana
+```
+
+### Train and register a model in Compose
+
+Build and run the one-shot training service when you want a new experiment. It uses the existing training pipeline, exact Python dependency constraints from `requirements-lock.txt`, the shared model volume, and the MLflow service hostname:
+
+```bash
+docker compose --profile training build trainer
+docker compose --profile training run --rm trainer python -m ml.train
+docker compose restart api
+```
+
+`docker compose restart api` reloads the just-trained model because the API caches its loaded model for its process lifetime. Normal API restarts never train. The API image also builds a reproducible fallback model, so a fresh `docker compose up -d` has a model even if you have not run the trainer yet. The named `model_data` volume is shared by the API and trainer, so subsequent API image rebuilds do not overwrite a model already stored in that volume.
+
+Inside a container, `localhost` refers to that same container. The trainer must use `http://mlflow:5000`, where `mlflow` is the Compose service name; `localhost:5000` would point back to the trainer container. The current API does not call MLflow during prediction. It receives the same service URI in its environment for future integrations, while the trainer actively uses it through `MLFLOW_TRACKING_URI`.
+
+The run records the existing experiment `mlops-iris-classifier`, its parameters, held-out `accuracy` and `macro_f1`, and the model artifact. Open [http://127.0.0.1:5000](http://127.0.0.1:5000) and select that experiment. **Backend metadata** (runs, parameters, metrics, and registry information) lives in PostgreSQL. **Artifacts** (logged models and run files) live in the MLflow artifact directory volume and are served by the tracking server. A logged model artifact is not automatically a registered model. To use the existing registration workflow after training:
+
+```bash
+docker compose --profile training run --rm trainer python -m ml.register_model
+```
+
+This registers a version using the existing `MLFLOW_MODEL_NAME` behavior/default; it does not deploy or promote the model. The local MLflow volume-backed store is separate from the existing Python workflow's SQLite `mlops/mlflow.db` and `mlops/mlruns/`, which remain usable without Docker.
+
+### Use the API, Prometheus, and Grafana
+
+From the Docker host:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl -X POST http://127.0.0.1:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"sepal_length":5.1,"sepal_width":3.5,"petal_length":1.4,"petal_width":0.2}'
+curl http://127.0.0.1:8000/metrics
+```
+
+The prediction request follows the existing `IrisFeatures` schema. The Prometheus UI is at [http://127.0.0.1:9090](http://127.0.0.1:9090); check [its targets page](http://127.0.0.1:9090/targets) and confirm the `ml-api` target is `UP`. The Compose scrape config targets `api:8000` on the internal Compose network. The application metric names are `http_requests_total` and `http_request_duration_seconds` (including `_bucket`, `_count`, and `_sum` histogram series). The provisioned Grafana dashboard reuses the Kubernetes dashboard queries for request rate, p95 latency, HTTP 5xx ratio, and scrape availability.
+
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000), sign in with `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD` from `.env`, then open the `MLOps` folder and `ML API Overview` dashboard. The Prometheus data source is provisioned as `http://prometheus:9090` on the Compose network. No UI requires manual data-source configuration.
+
+On EC2, create an SSH tunnel from your workstation (replace the host/user with yours):
+
+```bash
+ssh -L 8000:127.0.0.1:8000 -L 5000:127.0.0.1:5000 \
+  -L 9090:127.0.0.1:9090 -L 3000:127.0.0.1:3000 ubuntu@YOUR_EC2_HOST
+```
+
+Then use the same `127.0.0.1` URLs in your workstation browser. Port 5432 is intentionally not forwarded or published.
+
+### Stop, restart, and back up data
+
+```bash
+docker compose stop
+docker compose start
+docker compose down
+```
+
+These commands stop or remove containers and the Compose network but preserve named volumes. **Do not use `docker compose down -v` as a routine stop command**: that deletes PostgreSQL, MLflow artifact, Prometheus, Grafana, and model data volumes. If you intentionally want to reset all learning data, back it up first and remove volumes only after confirming the exact data-loss impact.
+
+Example backups from the repository root (store backups somewhere outside this EC2 host as well):
+
+```bash
+mkdir -p backups
+docker compose exec -T mlflow-db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backups/mlflow-metadata.sql
+docker compose cp mlflow:/mlflow/artifacts ./backups/mlflow-artifacts
+docker compose cp prometheus:/prometheus ./backups/prometheus-data
+docker compose cp grafana:/var/lib/grafana ./backups/grafana-data
+docker compose cp api:/app/models ./backups/models
+```
+
+The PostgreSQL dump contains MLflow metadata/registry state; the MLflow artifact copy contains model and run files. The other copies preserve monitoring state and the active joblib model. Back up while services are quiescent for a consistent snapshot, and test restoration before relying on a backup.
+
+### Troubleshooting
+
+- **Compose says variables are missing:** create `.env` from `.env.example`, then set the local database and Grafana passwords.
+- **A port is already in use:** stop the conflicting local process, or change only the host side of the port mapping (for example `127.0.0.1:8001:8000`). The service-to-service ports stay unchanged.
+- **MLflow does not become healthy:** inspect `docker compose logs mlflow mlflow-db`. Confirm PostgreSQL is healthy and the credentials match the existing `postgres_data` volume. Changing `.env` does not change the password inside an already initialized PostgreSQL volume; keep the old value or update the database role deliberately.
+- **Prometheus target is down:** inspect `docker compose ps`, API health/logs, and `http://127.0.0.1:8000/metrics`; the target must be `api:8000`, not `localhost:8000`.
+- **Prediction reports a missing model:** check that the API image built successfully and `model_data` is mounted. After training, restart the API to clear its in-process model cache.
+- **Grafana says the data source is unavailable:** ensure Prometheus is healthy and use the provisioned internal address `http://prometheus:9090`, not `localhost:9090`.
+- **Disk use grows:** named volumes persist after `docker compose down`; inspect them with `docker volume ls` and back them up before any cleanup.
+
+### Docker Compose compared with Kubernetes
+
+Compose runs named services on one Docker host and provides service-name DNS, health-based startup ordering, and local named volumes. It is useful for learning container networking and the MLflow database/artifact split. Kubernetes uses cluster scheduling, namespaces, Services, Deployments, HPA, persistent-volume claims, and controllers such as Argo CD; the existing `k8s/`, `monitoring/`, `argocd/`, and Terraform files remain unchanged and separate from this local Compose environment. Compose does not simulate EKS, multi-node failover, cloud IAM, or production persistence guarantees. **No AWS deployment is required or performed for this Compose setup.**
+
 ## Python setup
 
 Use Python 3.11 or newer. From this directory, create and activate a virtual environment:

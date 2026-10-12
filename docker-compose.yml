@@ -1,0 +1,138 @@
+services:
+  api:
+    image: iris-mlops-api:local
+    build:
+      context: ./mlops
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - model_data:/app/models
+
+  mlflow-db:
+    image: postgres:16.15-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Copy .env.example to .env and configure local values}
+      POSTGRES_USER: ${POSTGRES_USER:?Copy .env.example to .env and configure local values}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copy .env.example to .env and configure local values}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  mlflow:
+    image: iris-mlops-mlflow:local
+    build:
+      context: ./mlops
+      dockerfile: Dockerfile.mlflow
+    restart: unless-stopped
+    depends_on:
+      mlflow-db:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Copy .env.example to .env and configure local values}
+      POSTGRES_USER: ${POSTGRES_USER:?Copy .env.example to .env and configure local values}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copy .env.example to .env and configure local values}
+    command:
+      - sh
+      - -c
+      - >-
+        backend_uri="postgresql+psycopg2://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@mlflow-db:5432/$${POSTGRES_DB}";
+        mlflow db upgrade "$${backend_uri}" &&
+        exec mlflow server
+        --backend-store-uri "$${backend_uri}"
+        --artifacts-destination /mlflow/artifacts
+        --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
+        --host 0.0.0.0
+        --port 5000
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  trainer:
+    image: iris-mlops-training:local
+    build:
+      context: ./mlops
+      dockerfile: Dockerfile.training
+    profiles: [training]
+    restart: "no"
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    environment:
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+    volumes:
+      - model_data:/app/models
+
+  prometheus:
+    image: prom/prometheus:v3.5.5
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1500MB
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  grafana:
+    image: grafana/grafana:13.2.2-slim
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?Copy .env.example to .env and configure local values}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Copy .env.example to .env and configure local values}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/compose/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  model_data:
+  postgres_data:
+  mlflow_artifacts:
+  prometheus_data:
+  grafana_data:

@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -6,10 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd --system app && useradd --system --gid app --create-home app
+RUN groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app
 
-COPY requirements-api.txt ./requirements-api.txt
-RUN python -m pip install --disable-pip-version-check --no-compile -r requirements-api.txt
+COPY requirements-api.txt requirements-lock.txt ./
+RUN python -m pip install --disable-pip-version-check --no-compile \
+    --constraint requirements-lock.txt -r requirements-api.txt
 
 COPY app ./app
 COPY ml ./ml
