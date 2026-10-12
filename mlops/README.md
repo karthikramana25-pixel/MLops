@@ -18,7 +18,7 @@ The repository-root `docker-compose.yml` runs the existing API alongside Postgre
 
 ```mermaid
 flowchart LR
-  Client[Local browser or curl] -->|127.0.0.1:8000| API[api: FastAPI]
+  Client[Laptop browser or curl] -->|EC2 public IP: published port| API[api: FastAPI]
   API -->|/metrics| Prometheus[prometheus]
   Prometheus --> Grafana[grafana]
   Trainer[trainer: one-shot job] -->|MLFLOW_TRACKING_URI=http://mlflow:5000| MLflow[mlflow tracking server]
@@ -32,16 +32,16 @@ flowchart LR
 
 | Compose service | Purpose | Local access and persistence |
 |---|---|---|
-| `api` | Builds the existing FastAPI application and serves `/health`, `/predict`, and `/metrics`. The image includes a reproducible model created during the image build; container startup does not train it. | `http://127.0.0.1:8000`; shares the `model_data` volume with the trainer. |
+| `api` | Builds the existing FastAPI application and serves `/health`, `/predict`, and `/metrics`. The image includes a reproducible model created during the image build; container startup does not train it. | `http://EC2_PUBLIC_IP:8000` (or `http://127.0.0.1:8000` on the host); shares the `model_data` volume with the trainer. |
 | `mlflow-db` | Stores MLflow experiments, runs, parameters, metrics, and registry metadata in PostgreSQL. | No host port is published; `postgres_data` is persistent. |
-| `mlflow` | Provides the MLflow UI/API, connects to PostgreSQL, and proxies run-artifact uploads/downloads into its artifact directory. | `http://127.0.0.1:5000`; `mlflow_artifacts` is persistent. |
+| `mlflow` | Provides the MLflow UI/API, connects to PostgreSQL, and proxies run-artifact uploads/downloads into its artifact directory. | `http://EC2_PUBLIC_IP:5000` (or `http://127.0.0.1:5000` on the host); `mlflow_artifacts` is persistent. |
 | `trainer` | One-shot profile service that runs the existing `python -m ml.train` code and writes its joblib model to the shared model volume. | Not started by normal `docker compose up`; logs runs to `http://mlflow:5000`. |
-| `prometheus` | Scrapes the API at `api:8000/metrics` every 15 seconds. | `http://127.0.0.1:9090`; `prometheus_data` is persistent. |
-| `grafana` | Provisions Prometheus as its data source and loads the API dashboard automatically. | `http://127.0.0.1:3000`; `grafana_data` and dashboard files persist. |
+| `prometheus` | Scrapes the API at `api:8000/metrics` every 15 seconds. | `http://EC2_PUBLIC_IP:9090` (or `http://127.0.0.1:9090` on the host); `prometheus_data` is persistent. |
+| `grafana` | Provisions Prometheus as its data source and loads the API dashboard automatically. | `http://EC2_PUBLIC_IP:3000` (or `http://127.0.0.1:3000` on the host); `grafana_data` and dashboard files persist. |
 
 The Compose images are version-constrained: API and trainer use the Python 3.13 image family with the repository's exact `requirements-lock.txt` constraints; MLflow and its PostgreSQL driver use MLflow 3.16.1 and psycopg2-binary 2.9.11; PostgreSQL uses `16.15-alpine3.24`; Prometheus uses the existing pinned `v3.5.5` image; and Grafana uses `13.2.2-slim`. No service uses a floating `latest` tag. For immutable production builds, pin each base image by digest and maintain security updates deliberately.
 
-PostgreSQL and MLflow are published only on the host loopback address; PostgreSQL has no published port. The other UIs and API are also bound to `127.0.0.1` by default. For an EC2 development host, connect from your workstation with SSH port forwarding rather than opening these ports to the Internet. If you choose direct access instead, restrict the EC2 security group to your trusted public IP. This is a learning setup, not a production security boundary.
+The four browser services are published on all EC2 host interfaces so they can be reached directly by public IP when the network allows it. PostgreSQL has no published port. **This does not make the services safe for unrestricted Internet exposure:** MLflow and Prometheus do not have application authentication configured, and Grafana/API use plain HTTP. For temporary learning access, add inbound EC2 security-group rules for TCP 8000, 5000, 9090, and 3000 with the source set to your current trusted public IP as `/32`. Never use `0.0.0.0/0` for these ports. If access is needed by changing users/IPs or for a longer-running environment, keep these service ports private and use HTTPS plus an authenticated reverse proxy with DNS and TLS. The SSH tunnel alternative is documented below.
 
 ### Prerequisites and environment setup
 
@@ -56,7 +56,7 @@ cp .env.example .env
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
-Use one generated value for `POSTGRES_PASSWORD` and a different value for `GRAFANA_ADMIN_PASSWORD` in `.env`. Keep `MLFLOW_TRACKING_URI=http://mlflow:5000` for container-to-container training traffic. These values are for this local exercise only. Never use production credentials here or commit `.env`. The root `.gitignore` excludes `.env`, key material, generated MLflow files, Python caches, and Terraform state. The example file contains safe placeholders, not working production secrets.
+Use one generated value for `POSTGRES_PASSWORD` and a different value for `GRAFANA_ADMIN_PASSWORD` in `.env`. Keep `MLFLOW_TRACKING_URI=http://mlflow:5000` for container-to-container training traffic. Replace both occurrences of `EC2_PUBLIC_IP` in `MLFLOW_ALLOWED_HOSTS` with the instance's current public IPv4 address (include the address both with and without `:5000`) so MLflow accepts browser requests to its public URL. Keep these values for this learning exercise only. Never use production credentials here or commit `.env`. The root `.gitignore` excludes `.env`, key material, generated MLflow files, Python caches, and Terraform state. The example file contains safe placeholders, not working production secrets.
 
 ### Build and start
 
@@ -69,7 +69,7 @@ docker compose up -d
 docker compose ps
 ```
 
-`docker compose config` validates and renders the configuration. Be careful when sharing its output: it may include values from your local `.env`. `docker compose build` builds the API, MLflow, PostgreSQL, Prometheus, and Grafana images. The optional training image has its own build command below. `docker compose up -d` starts the five long-running services. PostgreSQL is marked healthy before MLflow starts; Prometheus waits for the API health check; Grafana waits for Prometheus. Health checks use the service's readiness endpoint or built-in command.
+`docker compose config` validates and renders the configuration. Be careful when sharing its output: it may include values from your local `.env`. `docker compose build` builds the API, MLflow, PostgreSQL, Prometheus, and Grafana images. The optional training image has its own build command below. `docker compose up -d` starts the five long-running services. PostgreSQL is marked healthy before MLflow starts; Prometheus waits for the API health check; Grafana waits for Prometheus. Health checks use the service's readiness endpoint or built-in command. Docker publishes these host ports on `0.0.0.0`; an AWS security group and any host firewall still control whether remote clients can reach them.
 
 Follow logs and check status with:
 
@@ -119,6 +119,39 @@ curl http://127.0.0.1:8000/metrics
 The prediction request follows the existing `IrisFeatures` schema. The Prometheus UI is at [http://127.0.0.1:9090](http://127.0.0.1:9090); check [its targets page](http://127.0.0.1:9090/targets) and confirm the `ml-api` target is `UP`. The Compose scrape config targets `api:8000` on the internal Compose network. The application metric names are `http_requests_total` and `http_request_duration_seconds` (including `_bucket`, `_count`, and `_sum` histogram series). The provisioned Grafana dashboard reuses the Kubernetes dashboard queries for request rate, p95 latency, HTTP 5xx ratio, and scrape availability.
 
 Open [http://127.0.0.1:3000](http://127.0.0.1:3000), sign in with `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD` from `.env`, then open the `MLOps` folder and `ML API Overview` dashboard. The Prometheus data source is provisioned as `http://prometheus:9090` on the Compose network. No UI requires manual data-source configuration.
+
+### Direct browser access from a laptop to EC2
+
+After Compose is running, use the EC2 instance's **Public IPv4 address** or **Public IPv4 DNS** shown in the EC2 console. The Compose ports are published on the EC2 network interfaces, so the browser URLs are:
+
+- FastAPI: `http://EC2_PUBLIC_IP:8000` (interactive docs at `/docs`)
+- MLflow: `http://EC2_PUBLIC_IP:5000`
+- Prometheus: `http://EC2_PUBLIC_IP:9090` (targets at `/targets`)
+- Grafana: `http://EC2_PUBLIC_IP:3000` (log in with the user/password in `.env`)
+
+Replace `EC2_PUBLIC_IP` with the actual address, or use the EC2 public DNS name. A public IP alone is not sufficient: the instance needs a public IPv4 address, a subnet route to an Internet Gateway, and security-group/firewall rules that permit the connection. Do not expose PostgreSQL port 5432; it has no published port.
+
+**Approach A — temporary learning access:** in the EC2 console, open **EC2 → Instances → your instance → Security → Security groups → Edit inbound rules**. Add four **Custom TCP** inbound rules, one each for ports `8000`, `5000`, `9090`, and `3000`. Set **Source** on every rule to **My IP** (a single trusted IPv4 address with `/32`), not `Anywhere-IPv4` (`0.0.0.0/0`). If your public IP changes, update the rules. Do not add a port 5432 rule. AWS settings are intentionally left for you to review and apply manually. If a restrictive network ACL or host firewall is configured, it must also permit the traffic and return traffic.
+
+Update the untracked `.env` on EC2 so `MLFLOW_ALLOWED_HOSTS` contains the instance's actual public IPv4 address twice: once by itself and once with `:5000`, for example `203.0.113.10,203.0.113.10:5000`, retaining the existing Compose/loopback entries. This allows MLflow's host validation to accept requests addressed to the public IP. Restart MLflow after editing: `docker compose up -d --force-recreate mlflow`.
+
+Run these checks on EC2 after startup:
+
+```bash
+docker compose config --quiet
+docker compose ps
+sudo ss -lntp
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:5000/health
+curl -fsS http://127.0.0.1:9090/-/ready
+curl -fsS http://127.0.0.1:9090/api/v1/targets
+curl -fsS http://127.0.0.1:3000/api/health
+docker compose exec api python -c "import urllib.request; print(urllib.request.urlopen('http://mlflow:5000/health').status)"
+```
+
+The Prometheus targets API response should show the `ml-api` target as `health: UP`. Then test the four public URLs from the laptop browser. If local curls work but remote access fails, verify the address, subnet route, security-group source CIDR, any host firewall, and that your laptop is using the same public IP entered in **My IP**. If MLflow responds with a host validation error, recheck `MLFLOW_ALLOWED_HOSTS` and recreate that service. If Grafana's password is not accepted, use the value in `.env`; Grafana's environment password only initializes a new data volume and does not reset an existing admin account.
+
+**Approach B — safer long-running access:** do not open the four service ports to laptop or Internet ingress. Put an authenticated reverse proxy in front of the private services, configure DNS names, obtain TLS certificates, and enforce authentication/authorization at the proxy. Keep PostgreSQL and the backend service ports private. This requires DNS/TLS and proxy configuration and is not installed by this project. The current direct-access learning mode uses unencrypted HTTP; MLflow and Prometheus have no user authentication here, so even trusted-IP restrictions are a temporary mitigation, not production security. Grafana has a password, but HTTP still exposes credentials in transit. Do not reuse important credentials.
 
 On EC2, create an SSH tunnel from your workstation (replace the host/user with yours):
 
