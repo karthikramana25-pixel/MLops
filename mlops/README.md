@@ -34,7 +34,7 @@ flowchart LR
 |---|---|---|
 | `api` | Builds the existing FastAPI application and serves `/health`, `/predict`, and `/metrics`. The image includes a reproducible model created during the image build; container startup does not train it. | `http://EC2_PUBLIC_IP:8000` (or `http://127.0.0.1:8000` on the host); shares the `model_data` volume with the trainer. |
 | `mlflow-db` | Stores MLflow experiments, runs, parameters, metrics, and registry metadata in PostgreSQL. | No host port is published; `postgres_data` is persistent. |
-| `mlflow` | Provides the MLflow UI/API, connects to PostgreSQL, and proxies run-artifact uploads/downloads into its artifact directory. | `http://EC2_PUBLIC_IP:5000` (or `http://127.0.0.1:5000` on the host); `mlflow_artifacts` is persistent. |
+| `mlflow` | Provides the MLflow UI/API, connects to PostgreSQL, and proxies run-artifact uploads/downloads into its artifact directory. It uses one worker to fit a small learning EC2 instance. | `http://EC2_PUBLIC_IP:5000` (or `http://127.0.0.1:5000` on the host); `mlflow_artifacts` is persistent. |
 | `trainer` | One-shot profile service that runs the existing `python -m ml.train` code and writes its joblib model to the shared model volume. | Not started by normal `docker compose up`; logs runs to `http://mlflow:5000`. |
 | `prometheus` | Scrapes the API at `api:8000/metrics` every 15 seconds. | `http://EC2_PUBLIC_IP:9090` (or `http://127.0.0.1:9090` on the host); `prometheus_data` is persistent. |
 | `grafana` | Provisions Prometheus as its data source and loads the API dashboard automatically. | `http://EC2_PUBLIC_IP:3000` (or `http://127.0.0.1:3000` on the host); `grafana_data` and dashboard files persist. |
@@ -124,7 +124,7 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000), sign in with `GRAFANA_ADMIN
 
 After Compose is running, use the EC2 instance's **Public IPv4 address** or **Public IPv4 DNS** shown in the EC2 console. The Compose ports are published on the EC2 network interfaces, so the browser URLs are:
 
-- FastAPI: `http://EC2_PUBLIC_IP:8000` (interactive docs at `/docs`)
+- FastAPI: `http://EC2_PUBLIC_IP:8000/docs` (the API root `/` may return 404; `/health` checks readiness)
 - MLflow: `http://EC2_PUBLIC_IP:5000`
 - Prometheus: `http://EC2_PUBLIC_IP:9090` (targets at `/targets`)
 - Grafana: `http://EC2_PUBLIC_IP:3000` (log in with the user/password in `.env`)
@@ -133,7 +133,7 @@ Replace `EC2_PUBLIC_IP` with the actual address, or use the EC2 public DNS name.
 
 **Approach A — temporary learning access:** in the EC2 console, open **EC2 → Instances → your instance → Security → Security groups → Edit inbound rules**. Add four **Custom TCP** inbound rules, one each for ports `8000`, `5000`, `9090`, and `3000`. Set **Source** on every rule to **My IP** (a single trusted IPv4 address with `/32`), not `Anywhere-IPv4` (`0.0.0.0/0`). If your public IP changes, update the rules. Do not add a port 5432 rule. AWS settings are intentionally left for you to review and apply manually. If a restrictive network ACL or host firewall is configured, it must also permit the traffic and return traffic.
 
-Update the untracked `.env` on EC2 so `MLFLOW_ALLOWED_HOSTS` contains the instance's actual public IPv4 address twice: once by itself and once with `:5000`, for example `203.0.113.10,203.0.113.10:5000`, retaining the existing Compose/loopback entries. This allows MLflow's host validation to accept requests addressed to the public IP. Restart MLflow after editing: `docker compose up -d --force-recreate mlflow`.
+Update the untracked `.env` on EC2 so `MLFLOW_ALLOWED_HOSTS` contains the chosen public host twice: once by itself and once with `:5000`, for example `203.0.113.10,203.0.113.10:5000`, retaining the existing Compose/loopback entries. If you browse using the public DNS name, add that DNS name both with and without `:5000` too. This allows MLflow's host validation to accept requests addressed to that host. Restart MLflow after editing: `docker compose up -d --force-recreate mlflow`.
 
 Run these checks on EC2 after startup:
 
